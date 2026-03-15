@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Chat Exporter (Gemini Only)",
   "description": "Export Gemini chats to Markdown, JSON, HTML with perfectly embedded images.",
-  "version": "4.4.0",
+  "version": "4.0.2.1",
   "permissions": [
     "storage"
   ],
