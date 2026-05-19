@@ -1,5 +1,6 @@
 /**
- * Gemini Chat Exporter (Clean UI, Square Images, Base64 - Fixed Array Index Bug)
+ * Gemini Chat Exporter (Clean UI, Square Images, Base64 + JSON)
+ * Убраны reasoning и model id под новые реалии DOM Gemini
  */
 
 (function() {
@@ -10,8 +11,7 @@
     SELECTORS: {
       CHAT_CONTAINER: '[data-test-id="chat-history-container"]',
       CONVERSATION_TURN: 'div.conversation-container',
-      USER_QUERY_TEXT: '.query-text .query-text-line',
-      MODEL_RESPONSE_CONTENT: 'message-content .markdown'
+      USER_QUERY_TEXT: '.query-text .query-text-line'
     },
     TIMING: {
       SCROLL_DELAY: 2000,
@@ -44,7 +44,7 @@
     static sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     }
-    
+
     static createNotification(message) {
       const popup = document.createElement('div');
       Object.assign(popup.style, {
@@ -57,7 +57,7 @@
       document.body.appendChild(popup);
       setTimeout(() => popup.remove(), CONFIG.TIMING.POPUP_DURATION);
     }
-    
+
     static isVisible(element) {
       return element && element.getBoundingClientRect().height > 0;
     }
@@ -88,20 +88,24 @@
       }
 
       return new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: 'fetchImage', url: src }, (response) => {
-          if (chrome.runtime.lastError || !response || response.error) {
-            resolve(src); 
-          } else {
-            resolve(response.base64);
-          }
-        });
+        if (window.chrome && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ action: 'fetchImage', url: src }, (response) => {
+            if (chrome.runtime.lastError || !response || response.error) {
+              resolve(src);
+            } else {
+              resolve(response.base64);
+            }
+          });
+        } else {
+          resolve(src);
+        }
       });
     }
 
     static async processNodeImages(clonedNode) {
       const imgs = Array.from(clonedNode.querySelectorAll('img'));
       const base64Images = [];
-      
+
       for (let img of imgs) {
         if (img.classList.contains('user-icon') || img.src.includes('avatar') || img.src.includes('spark')) {
           img.remove();
@@ -111,8 +115,8 @@
         const b64 = await this.getBase64FromImage(img);
         if (b64) {
           img.src = b64;
-          img.removeAttribute('srcset'); 
-          img.removeAttribute('loading'); 
+          img.removeAttribute('srcset');
+          img.removeAttribute('loading');
           if (b64.startsWith('data:')) {
             base64Images.push(b64);
           }
@@ -121,11 +125,10 @@
       return base64Images;
     }
 
-    
     static sanitizeNode(node) {
       const junkSelectors = [
-        'message-actions', 
-        '.generated-image-controls', 
+        'message-actions',
+        '.generated-image-controls',
         '.conversation-actions-container',
         'share-button',
         'copy-button',
@@ -134,7 +137,10 @@
         'regenerate-button',
         'bot-actions-menu',
         'tts-control',
-        '.action-button'
+        '.action-button',
+        'thinking-overlay',          // Скрытие новых системных оверлеев
+        'freemium-rag-disclaimer',   // Убирает плашки об ограничениях
+        'sensitive-memories-banner'  // Убирает новые баннеры памяти
       ];
       node.querySelectorAll(junkSelectors.join(', ')).forEach(el => el.remove());
     }
@@ -162,15 +168,20 @@
       return td;
     }
 
-    async extractUser(turn) {
+    async extractUser(turn, includeImages = true) {
       const userContent = turn.querySelector('user-query');
       if (!userContent) return { text: '', images: [] };
 
       const cloned = userContent.cloneNode(true);
       DOMUtils.sanitizeNode(cloned);
-      
-      const images = await DOMUtils.processNodeImages(cloned);
-      
+
+      let images = [];
+      if (includeImages) {
+        images = await DOMUtils.processNodeImages(cloned);
+      } else {
+        cloned.querySelectorAll('img').forEach(img => img.remove());
+      }
+
       const lines = Array.from(cloned.querySelectorAll(CONFIG.SELECTORS.USER_QUERY_TEXT))
         .map(el => el.textContent.trim()).filter(t => t.length > 0);
       const text = lines.length ? lines.join('\n') : (cloned.querySelector('.query-text')?.textContent.trim() || '');
@@ -178,18 +189,25 @@
       return { text, images };
     }
 
-    async extractModel(turn) {
-      const contentEl = turn.querySelector(CONFIG.SELECTORS.MODEL_RESPONSE_CONTENT);
+    async extractModel(turn, includeImages = true) {
+      const contentEls = turn.querySelectorAll('message-content .markdown');
+      const contentEl = contentEls.length > 0 ? contentEls[contentEls.length - 1] : null;
+
       if (!contentEl) return { text: '', html: '', images: [] };
-      
+
       const cloned = contentEl.cloneNode(true);
       DOMUtils.sanitizeNode(cloned);
 
-      const images = await DOMUtils.processNodeImages(cloned);
-      
+      let images = [];
+      if (includeImages) {
+        images = await DOMUtils.processNodeImages(cloned);
+      } else {
+        cloned.querySelectorAll('img').forEach(img => img.remove());
+      }
+
       const rawHtml = cloned.innerHTML;
       const markdown = this.turndown ? this.turndown.turndown(rawHtml) : cloned.textContent;
-      
+
       return {
         text: StringUtils.removeCitations(markdown),
         html: rawHtml,
@@ -199,19 +217,19 @@
   }
 
   class ExportFormatters {
-    static async generateMD(turns, title, extractor) {
+    static async generateMD(turns, title, extractor, includeImages = true) {
       let md = `# ${title}\n> Exported on: ${new Date().toLocaleString()}\n\n---\n\n`;
-      
+
       for (let i = 0; i < turns.length; i++) {
         DOMUtils.createNotification(`Processing message ${i + 1}/${turns.length}...`);
-        
-        const user = await extractor.extractUser(turns[i]);
+
+        const user = await extractor.extractUser(turns[i], includeImages);
         if (user.text || user.images.length) {
           md += `## You\n\n${user.text}\n\n`;
           user.images.forEach((b64, idx) => md += `![User Upload ${idx + 1}](${b64})\n\n`);
         }
 
-        const model = await extractor.extractModel(turns[i]);
+        const model = await extractor.extractModel(turns[i], includeImages);
         if (model.text) {
           md += `## Gemini\n\n${model.text}\n\n`;
         }
@@ -220,7 +238,7 @@
       return md;
     }
 
-    static async generateJSON(turns, title, extractor) {
+    static async generateJSON(turns, title, extractor, includeImages = true) {
       const json = {
         title: title,
         messages: []
@@ -228,8 +246,8 @@
 
       for (let i = 0; i < turns.length; i++) {
         DOMUtils.createNotification(`Processing message ${i + 1}/${turns.length}...`);
-        
-        const user = await extractor.extractUser(turns[i]);
+
+        const user = await extractor.extractUser(turns[i], includeImages);
         if (user.text || user.images.length) {
           const content = [];
           if (user.text) content.push({ type: "text", text: user.text });
@@ -237,24 +255,25 @@
           json.messages.push({ role: "user", content: content });
         }
 
-        const model = await extractor.extractModel(turns[i]);
+        const model = await extractor.extractModel(turns[i], includeImages);
         if (model.text || model.images.length) {
           const content = [];
           if (model.text) content.push({ type: "text", text: model.text });
           model.images.forEach(b64 => content.push({ type: "image", image_url: b64 }));
+          
           json.messages.push({ role: "assistant", content: content });
         }
       }
       return JSON.stringify(json, null, 2);
     }
 
-    static async generateHTML(turns, title, extractor) {
+    static async generateHTML(turns, title, extractor, includeImages = true) {
       let bodyHtml = '';
-      
+
       for (let i = 0; i < turns.length; i++) {
         DOMUtils.createNotification(`Processing message ${i + 1}/${turns.length}...`);
-        
-        const user = await extractor.extractUser(turns[i]);
+
+        const user = await extractor.extractUser(turns[i], includeImages);
         if (user.text || user.images.length) {
           bodyHtml += `<div class="message user"><h3>You</h3><p>${user.text.replace(/\n/g, '<br>')}</p>`;
           if (user.images.length > 0) {
@@ -267,7 +286,7 @@
           bodyHtml += `</div>`;
         }
 
-        const model = await extractor.extractModel(turns[i]);
+        const model = await extractor.extractModel(turns[i], includeImages);
         if (model.html) {
           bodyHtml += `<div class="message assistant"><h3>Gemini</h3><div class="model-content">${model.html}</div></div>`;
         }
@@ -287,17 +306,9 @@
   h3 { margin-top: 0; font-size: 1.1em; color: #555; }
   pre { background: #f1f3f4; padding: 10px; border-radius: 4px; overflow-x: auto; }
   code { font-family: monospace; }
-  
   .image-gallery, .model-content { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
   .model-content { flex-direction: column; }
-  .message img { 
-    width: 200px; 
-    height: 200px; 
-    object-fit: cover; 
-    border-radius: 8px; 
-    border: 1px solid #ddd;
-    background-color: #f1f3f4;
-  }
+  .message img { width: 200px; height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid #ddd; background-color: #f1f3f4; }
   .model-content img { display: inline-block; }
 </style>
 </head>
@@ -336,9 +347,10 @@
       });
 
       const formats = [
-        { id: 'md', label: 'Markdown (.md)', ext: 'md', mime: 'text/markdown' },
-        { id: 'json', label: 'JSON Format', ext: 'json', mime: 'application/json' },
-        { id: 'html', label: 'HTML Page', ext: 'html', mime: 'text/html' }
+        { id: 'md', label: 'Markdown (.md)', ext: 'md', mime: 'text/markdown', includeImages: true },
+        { id: 'md_no_img', label: 'MD (no img)', ext: 'md', mime: 'text/markdown', includeImages: false },
+        { id: 'json', label: 'JSON Format', ext: 'json', mime: 'application/json', includeImages: true },
+        { id: 'html', label: 'HTML Page', ext: 'html', mime: 'text/html', includeImages: true }
       ];
 
       formats.forEach(f => {
@@ -385,7 +397,7 @@
 
       try {
         await this._scrollToBottom();
-        
+
         const turns = Array.from(document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN))
                            .filter(DOMUtils.isVisible);
 
@@ -395,9 +407,9 @@
         const filename = `${StringUtils.sanitizeFilename(title)}_${DateUtils.getDateString()}.${formatInfo.ext}`;
 
         let outputData = '';
-        if (formatInfo.id === 'md') outputData = await ExportFormatters.generateMD(turns, title, this.extractor);
-        if (formatInfo.id === 'json') outputData = await ExportFormatters.generateJSON(turns, title, this.extractor);
-        if (formatInfo.id === 'html') outputData = await ExportFormatters.generateHTML(turns, title, this.extractor);
+        if (formatInfo.id.startsWith('md')) outputData = await ExportFormatters.generateMD(turns, title, this.extractor, formatInfo.includeImages);
+        if (formatInfo.id === 'json') outputData = await ExportFormatters.generateJSON(turns, title, this.extractor, formatInfo.includeImages);
+        if (formatInfo.id === 'html') outputData = await ExportFormatters.generateHTML(turns, title, this.extractor, formatInfo.includeImages);
 
         this._downloadFile(outputData, filename, formatInfo.mime);
       } catch (e) {
@@ -412,15 +424,15 @@
     async _scrollToBottom() {
       const scrollContainer = document.querySelector(CONFIG.SELECTORS.CHAT_CONTAINER);
       if (!scrollContainer) return;
-      
+
       let stableScrolls = 0, scrollAttempts = 0, lastScrollTop = null;
       while (stableScrolls < CONFIG.TIMING.MAX_STABLE_SCROLLS && scrollAttempts < CONFIG.TIMING.MAX_SCROLL_ATTEMPTS) {
         scrollContainer.scrollTop = 0;
         await DOMUtils.sleep(CONFIG.TIMING.SCROLL_DELAY);
-        
+
         if (lastScrollTop === scrollContainer.scrollTop || scrollContainer.scrollTop === 0) stableScrolls++;
         else stableScrolls = 0;
-        
+
         lastScrollTop = scrollContainer.scrollTop;
         scrollAttempts++;
       }
