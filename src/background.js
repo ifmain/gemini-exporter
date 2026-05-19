@@ -9,7 +9,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         reader.readAsDataURL(blob);
       })
       .catch(error => sendResponse({ error: error.message }));
-    
+
     return true; // Держим канал открытым для асинхронного ответа
   }
 });
